@@ -31,9 +31,13 @@ target_compile_definitions(unit_tests PRIVATE TEST_DATA_DIR="${PROJECT_SOURCE_DI
 
 # Link against OSI made available by parent CMakeLists.txt
 if (LINK_WITH_SHARED_OSI)
-    target_link_libraries(unit_tests PRIVATE open_simulation_interface::open_simulation_interface)
+    if (WIN32)
+        target_link_libraries(unit_tests PRIVATE open_simulation_interface::open_simulation_interface_pic)
+    else ()
+        target_link_libraries(unit_tests PRIVATE open_simulation_interface::open_simulation_interface)
+    endif ()
 else ()
-    target_link_libraries(unit_tests PRIVATE open_simulation_interface::open_simulation_interface_pic)
+    target_link_libraries(unit_tests PRIVATE open_simulation_interface::open_simulation_interface_static)
 endif ()
 
 # Find compression libraries (LZ4, ZSTD)

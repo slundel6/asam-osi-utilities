@@ -58,9 +58,14 @@ endif ()
 # in ReadResult, google::protobuf::Descriptor* in AddChannel) and consumers need
 # OSI headers to instantiate WriteMessage<osi3::GroundTruth>() etc.
 if (LINK_WITH_SHARED_OSI)
-    set(OSI_LINK_TARGET open_simulation_interface::open_simulation_interface)
+    if (WIN32)
+        # In Windows packaging, shared mode is distributed with the _pic import lib name.
+        set(OSI_LINK_TARGET open_simulation_interface::open_simulation_interface_pic)
+    else ()
+        set(OSI_LINK_TARGET open_simulation_interface::open_simulation_interface)
+    endif ()
 else ()
-    set(OSI_LINK_TARGET open_simulation_interface::open_simulation_interface_pic)
+    set(OSI_LINK_TARGET open_simulation_interface::open_simulation_interface_static)
 endif ()
 target_link_libraries(OSIUtilities PUBLIC ${OSI_LINK_TARGET})
 
