@@ -2,186 +2,97 @@
 # SPDX-License-Identifier: MPL-2.0
 cmake_minimum_required(VERSION 3.16)
 
-# Add cmake modules directory early so we can use custom find modules
+# Add cmake modules directory
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cpp/cmake")
 
-# Read version from vcpkg.json (single source of truth)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json" VCPKG_JSON)
-string(REGEX MATCH "\"version-string\"[ \t]*:[ \t]*\"([^\"]+)\"" _ "${VCPKG_JSON}")
-if (NOT CMAKE_MATCH_1)
-    message(FATAL_ERROR "Unable to read version-string from vcpkg.json")
-endif ()
-set(PROJECT_VERSION_FROM_VCPKG "${CMAKE_MATCH_1}")
-
-project(asam-osi-utilities VERSION ${PROJECT_VERSION_FROM_VCPKG})
+project(asam-osi-utilities)
 
 # Generate compile_commands.json for clang based tools
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)
+# User-configurable paths for OSI library and includes
+set(OSI_LIBRARY_DIR "" CACHE PATH "Path to directory containing OSI static library")
+set(OSI_INCLUDE_DIR "" CACHE PATH "Path to directory containing OSI headers")
+
+# Optional: produce a single bundled static archive containing OSIUtilities + compression libs
+option(OSIUTILITIES_BUNDLE_COMPRESSION_LIBS "Bundle lz4/zstd into a merged static archive (Linux/Unix)" OFF)
+set(LZ4_STATIC_LIBRARY "" CACHE FILEPATH "Absolute path to liblz4.a for bundling")
+set(ZSTD_STATIC_LIBRARY "" CACHE FILEPATH "Absolute path to libzstd.a for bundling")
+
+if (NOT OSI_LIBRARY_DIR)
+    message(FATAL_ERROR "OSI_LIBRARY_DIR must be set to the directory containing OSI libraries.\n"
+                        "Example: cmake -DOSI_LIBRARY_DIR=/path/to/osi/lib -DOSI_INCLUDE_DIR=/path/to/osi/include ..")
+endif ()
+
+if (NOT OSI_INCLUDE_DIR)
+    message(FATAL_ERROR "OSI_INCLUDE_DIR must be set to the directory containing OSI headers.\n"
+                        "Example: cmake -DOSI_LIBRARY_DIR=/path/to/osi/lib -DOSI_INCLUDE_DIR=/path/to/osi/include ..")
+endif ()
+
+if (NOT EXISTS "${OSI_LIBRARY_DIR}")
+    message(FATAL_ERROR "OSI_LIBRARY_DIR path does not exist: ${OSI_LIBRARY_DIR}")
+endif ()
+
+if (NOT EXISTS "${OSI_INCLUDE_DIR}")
+    message(FATAL_ERROR "OSI_INCLUDE_DIR path does not exist: ${OSI_INCLUDE_DIR}")
+endif ()
+
+# Create imported target for OSI library
+add_library(open_simulation_interface_static STATIC IMPORTED)
+
+# Construct library path directly (no find_library, just direct path)
+# Try _pic variant first (Position Independent Code), then standard
+set(OSI_STATIC_LIB "${OSI_LIBRARY_DIR}/libopen_simulation_interface_pic.a")
+if (NOT EXISTS "${OSI_STATIC_LIB}")
+    set(OSI_STATIC_LIB "${OSI_LIBRARY_DIR}/libopen_simulation_interface.a")
+endif ()
+
+# For Windows, try .lib extension as well
+if (WIN32 AND NOT EXISTS "${OSI_STATIC_LIB}")
+    set(OSI_STATIC_LIB "${OSI_LIBRARY_DIR}/open_simulation_interface.lib")
+endif ()
+
+if (NOT EXISTS "${OSI_STATIC_LIB}")
+    message(FATAL_ERROR "Could not find open_simulation_interface static library at:\n"
+                        "  ${OSI_LIBRARY_DIR}/libopen_simulation_interface_pic.a\n"
+                        "  ${OSI_LIBRARY_DIR}/libopen_simulation_interface.a\n"
+                        "  ${OSI_LIBRARY_DIR}/open_simulation_interface.lib\n"
+                        "Please check OSI_LIBRARY_DIR: ${OSI_LIBRARY_DIR}")
+endif ()
+
+# Check for protobuf library (needed by OSI)
+set(PROTOBUF_STATIC_LIB "${OSI_LIBRARY_DIR}/libprotobuf.a")
+if (NOT EXISTS "${PROTOBUF_STATIC_LIB}")
+    set(PROTOBUF_STATIC_LIB "")
+endif ()
+
+set_target_properties(open_simulation_interface_static PROPERTIES
+    IMPORTED_LOCATION "${OSI_STATIC_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${OSI_INCLUDE_DIR}"
+)
+
+# Add protobuf as a dependency if found in the same directory
+if (PROTOBUF_STATIC_LIB)
+    set_target_properties(open_simulation_interface_static PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${PROTOBUF_STATIC_LIB}"
+    )
+endif ()
+
+# Create an alias for consistency with other approaches
+add_library(open_simulation_interface::open_simulation_interface_static ALIAS open_simulation_interface_static)
+
+message(STATUS "Found OSI library: ${OSI_STATIC_LIB}")
+message(STATUS "OSI includes: ${OSI_INCLUDE_DIR}")
+if (PROTOBUF_STATIC_LIB)
+    message(STATUS "Found protobuf library: ${PROTOBUF_STATIC_LIB}")
+endif ()
 
 # Add the include folder for public headers
 include_directories(${PROJECT_SOURCE_DIR}/cpp/include)
 
-# Build options
-option(BUILD_DOCS "Build documentation (Doxygen XML + Sphinx)" OFF)
-option(BUILD_TESTING "Build unit tests" OFF)
-option(BUILD_EXAMPLES "Build example programs" ON)
-option(OSIUTILITIES_DOCS_ONLY "Build only documentation (skip library/examples/tests)" OFF)
-option(OSIUTILITIES_RUN_TESTS "Run tests after build (implies BUILD_TESTING=ON)" OFF)
-option(LINK_WITH_SHARED_OSI "Link utils with shared OSI library instead of statically linking" OFF)
+# Build the library
+add_subdirectory(cpp/src)
 
-if (APPLE)
-    if (NOT CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg\\.cmake")
-        message(FATAL_ERROR "macOS builds are supported only via vcpkg. "
-                            "Please configure with the vcpkg preset (cmake --preset vcpkg) "
-                            "or set CMAKE_TOOLCHAIN_FILE to vcpkg.cmake.")
-    endif ()
-endif ()
-
-if (OSIUTILITIES_DOCS_ONLY)
-    set(BUILD_DOCS ON CACHE BOOL "Build documentation (Doxygen XML + Sphinx)" FORCE)
-    set(BUILD_TESTING OFF CACHE BOOL "Build unit tests" FORCE)
-    set(BUILD_EXAMPLES OFF CACHE BOOL "Build example programs" FORCE)
-    if (OSIUTILITIES_RUN_TESTS)
-        message(WARNING "OSIUTILITIES_RUN_TESTS is ignored when OSIUTILITIES_DOCS_ONLY=ON")
-        set(OSIUTILITIES_RUN_TESTS OFF CACHE BOOL "Run tests after build (implies BUILD_TESTING=ON)" FORCE)
-    endif ()
-endif ()
-
-if (OSIUTILITIES_RUN_TESTS)
-    set(BUILD_TESTING ON CACHE BOOL "Build unit tests" FORCE)
-endif ()
-
-if (DEFINED USE_EXTERNAL_OSI AND USE_EXTERNAL_OSI)
-    message(FATAL_ERROR "External OSI is disabled; use the bundled submodules/osi-cpp submodule.")
-elseif (DEFINED USE_EXTERNAL_OSI)
-    message(STATUS "Ignoring legacy USE_EXTERNAL_OSI option; using bundled submodule.")
-endif ()
-
-if (NOT OSIUTILITIES_DOCS_ONLY)
-    # Use bundled osi-cpp submodule, which builds open_simulation_interface.
-    set(OSI_CPP_DIR ${PROJECT_SOURCE_DIR}/submodules/osi-cpp)
-    if (NOT EXISTS "${OSI_CPP_DIR}/CMakeLists.txt")
-        message(FATAL_ERROR "osi-cpp submodule not found. Run: git submodule update --init --recursive")
-    endif ()
-    set(OSI_OPEN_SIM_INTERFACE_DIR "${OSI_CPP_DIR}/open-simulation-interface")
-    if (NOT EXISTS "${OSI_OPEN_SIM_INTERFACE_DIR}/VERSION"
-        OR NOT EXISTS "${OSI_OPEN_SIM_INTERFACE_DIR}/osi_version.proto.in")
-        message(FATAL_ERROR
-                "osi-cpp nested submodule open-simulation-interface is missing or incomplete. "
-                "Run: git submodule update --init --recursive")
-    endif ()
-    message(STATUS "Using bundled osi-cpp submodule at ${OSI_CPP_DIR}")
-    add_subdirectory(${OSI_CPP_DIR} ${CMAKE_BINARY_DIR}/osi-cpp)
-
-    # osi-cpp's shared library target does not declare dllexport symbols, so on
-    # Windows MSVC no import library (.lib) is generated.  Setting this property
-    # makes CMake auto-export every symbol so the import lib is always produced.
-    if(WIN32 AND TARGET open_simulation_interface)
-        set_target_properties(open_simulation_interface PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-    endif()
-
-    get_directory_property(OSI_VERSION_MAJOR DIRECTORY ${OSI_CPP_DIR} DEFINITION VERSION_MAJOR)
-    get_directory_property(OSI_VERSION_MINOR DIRECTORY ${OSI_CPP_DIR} DEFINITION VERSION_MINOR)
-    get_directory_property(OSI_VERSION_PATCH DIRECTORY ${OSI_CPP_DIR} DEFINITION VERSION_PATCH)
-    if (OSI_VERSION_MAJOR AND OSI_VERSION_MINOR AND OSI_VERSION_PATCH)
-        set(OSI_VERSION "${OSI_VERSION_MAJOR}.${OSI_VERSION_MINOR}.${OSI_VERSION_PATCH}")
-    endif ()
-
-endif ()
-
-# Trace file spec version implemented by this library (default matches OSI 3.8.0-rc1 tag used in submodule)
-set(OSI_TRACE_FILE_SPEC_VERSION "3.8.0-rc1" CACHE STRING "Trace file specification version implemented by OSIUtilities")
-if (OSI_VERSION AND NOT OSI_VERSION STREQUAL OSI_TRACE_FILE_SPEC_VERSION)
-    message(STATUS "OSI version detected: ${OSI_VERSION} (trace file spec: ${OSI_TRACE_FILE_SPEC_VERSION})")
-endif ()
-
-
-# option to enable coverage reporting
-option(CODE_COVERAGE "Enable coverage reporting" OFF)
-if (CODE_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(--coverage -O0 -g)
-    add_link_options(--coverage)
-    message(WARNING "Added coverage options")
-endif ()
-
-# build documentation (Doxygen XML → Sphinx HTML)
-if (BUILD_DOCS AND PROJECT_IS_TOP_LEVEL)
-    find_package(Doxygen REQUIRED)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-    # Verify sphinx-build is available
-    execute_process(
-            COMMAND ${Python3_EXECUTABLE} -m sphinx --version
-            RESULT_VARIABLE SPHINX_CHECK_RESULT
-            OUTPUT_QUIET ERROR_QUIET
-    )
-    if (NOT SPHINX_CHECK_RESULT EQUAL 0)
-        message(FATAL_ERROR
-                "sphinx-build not found. Install documentation dependencies:\n"
-                "  pip install -e \"python/[docs]\"")
-    endif ()
-
-    message(STATUS "Doxygen + Sphinx found, generating unified documentation")
-
-    # Configure Doxyfile (XML-only output for Breathe)
-    set(DOXYGEN_IN ${CMAKE_CURRENT_SOURCE_DIR}/doc/Doxyfile.in)
-    set(DOXYGEN_OUT ${CMAKE_CURRENT_BINARY_DIR}/doc/Doxyfile)
-    configure_file(${DOXYGEN_IN} ${DOXYGEN_OUT} @ONLY)
-
-    # Step 1: Doxygen generates XML from C++ headers
-    add_custom_target(
-            doxygen_xml
-            COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYGEN_OUT}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Generating C++ API XML with Doxygen"
-            VERBATIM
-    )
-
-    # Step 2: Sphinx consumes Doxygen XML (via Breathe) + Python autodoc → HTML
-    add_custom_target(
-            library_api_doc
-            COMMAND ${Python3_EXECUTABLE} -m sphinx
-            -b html
-            -W --keep-going
-            -q
-            ${CMAKE_CURRENT_SOURCE_DIR}/doc
-            ${CMAKE_CURRENT_SOURCE_DIR}/doc/html
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Building unified documentation with Sphinx"
-            VERBATIM
-            DEPENDS doxygen_xml
-    )
-    if (OSIUTILITIES_DOCS_ONLY)
-        add_custom_target(docs_only ALL DEPENDS library_api_doc)
-    endif ()
-endif ()
-
-if (NOT OSIUTILITIES_DOCS_ONLY)
-    add_subdirectory(cpp/src)
-    if (PROJECT_IS_TOP_LEVEL)
-        include(CTest)
-        if (BUILD_TESTING)
-            enable_testing()
-            add_subdirectory(cpp/tests)
-            if (OSIUTILITIES_RUN_TESTS)
-                set(CTEST_CONFIG_ARG "")
-                if (CMAKE_CONFIGURATION_TYPES)
-                    set(CTEST_CONFIG_ARG "-C" "$<CONFIG>")
-                endif ()
-                add_custom_target(
-                        run_tests
-                        ALL
-                        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_CONFIG_ARG}
-                        DEPENDS unit_tests
-                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-                        USES_TERMINAL
-                )
-            endif ()
-        endif ()
-    endif ()
-    if (BUILD_EXAMPLES)
-        add_subdirectory(cpp/examples)
-    endif ()
-endif ()
+message(STATUS "Build configuration:")
+message(STATUS "  OSI library: ${OSI_LIBRARY_DIR}")
+message(STATUS "  Output: Static library OSIUtilities")
